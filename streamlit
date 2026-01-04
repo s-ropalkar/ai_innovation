@@ -1,0 +1,232 @@
+import streamlit as st
+import pandas as pd
+from snowflake.snowpark.context import get_active_session
+
+# ======================================================
+# PAGE CONFIG
+# ======================================================
+st.set_page_config(
+    page_title="ESIP – Essential Supply Intelligence Platform",
+    page_icon="🧠",
+    layout="wide"
+)
+
+session = get_active_session()
+
+# ======================================================
+# CUSTOM STYLING
+# ======================================================
+st.markdown("""
+<style>
+.big-title {font-size:42px;font-weight:800}
+.sub {color:#9ca3af;font-size:16px}
+.section {margin-top:25px}
+</style>
+""", unsafe_allow_html=True)
+
+# ======================================================
+# HEADER
+# ======================================================
+st.markdown("<div class='big-title'>🧠 ESIP</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub'>AI-powered intelligence for sustainable supply chains</div>", unsafe_allow_html=True)
+st.markdown("---")
+
+# ======================================================
+# LOAD DATA
+# ======================================================
+@st.cache_data
+def load_inventory():
+    return session.sql("""
+        SELECT
+            DATE, LOCATION, PRODUCT_ID, PRODUCT_NAME, CATEGORY,
+            CLOSING_STOCK, DAILY_SALES_AVG, DAYS_TO_EXPIRY,
+            LEAD_TIME_DAYS, DEMAND_SCORE, STOCKOUT_DAYS, TARGET_LABEL
+        FROM SMART_DISTRIBUTION.CORE.INVENTORY
+    """).to_pandas()
+
+inventory = load_inventory()
+
+# ======================================================
+# SIDEBAR NAVIGATION (THIS MATCHES YOUR SCREENSHOT)
+# ======================================================
+with st.sidebar:
+    st.title("🧭 Navigation")
+
+    page = st.radio(
+        "Go to",
+        [
+            "📊 Overview",
+            "🚨 Risk & Alerts",
+            "🗺️ Allocation Insights",
+            "🤝 Donation & Redistribution",
+            "📦 Reorder Planning",
+            "📈 Impact & Audit"
+        ]
+    )
+
+# ======================================================
+# TOP FILTER BAR
+# ======================================================
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    location = st.multiselect(
+        "📍 Location",
+        sorted(inventory["LOCATION"].unique()),
+        default=inventory["LOCATION"].unique()
+    )
+
+with c2:
+    category = st.multiselect(
+        "📦 Category",
+        sorted(inventory["CATEGORY"].unique()),
+        default=inventory["CATEGORY"].unique()
+    )
+
+with c3:
+    decision = st.multiselect(
+        "🎯 Decision",
+        ["OK", "REORDER", "DONATE"],
+        default=["OK", "REORDER", "DONATE"]
+    )
+
+filtered = inventory[
+    (inventory["LOCATION"].isin(location)) &
+    (inventory["CATEGORY"].isin(category)) &
+    (inventory["TARGET_LABEL"].isin(decision))
+]
+
+st.markdown("---")
+
+# ======================================================
+# 📊 OVERVIEW
+# ======================================================
+if page == "📊 Overview":
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total SKUs", filtered["PRODUCT_ID"].nunique())
+    c2.metric("At Risk Items", filtered[filtered["TARGET_LABEL"] != "OK"].shape[0])
+    c3.metric("Expiry ≤ 3 Days", filtered[filtered["DAYS_TO_EXPIRY"] <= 3].shape[0])
+    c4.metric("Avg Demand Score", round(filtered["DEMAND_SCORE"].mean(), 2))
+
+    st.markdown("### 📦 Inventory Distribution by Category")
+
+    cat_stock = (
+        filtered.groupby("CATEGORY")["CLOSING_STOCK"]
+        .sum()
+        .reset_index()
+    )
+
+    st.bar_chart(cat_stock.set_index("CATEGORY"))
+
+    with st.expander("🤖 AI Explanation"):
+        st.markdown("""
+        • Aggregates live inventory across locations  
+        • Highlights categories with supply stress  
+        • Supports data-driven planning  
+        """)
+
+# ======================================================
+# 🚨 RISK & ALERTS
+# ======================================================
+elif page == "🚨 Risk & Alerts":
+
+    df = filtered.copy()
+    df["DAYS_COVER"] = (df["CLOSING_STOCK"] / df["DAILY_SALES_AVG"]).replace(float("inf"), 999)
+
+    risk = df[df["DAYS_COVER"] < df["LEAD_TIME_DAYS"]]
+
+    st.markdown("### 🚨 High Stock-out Risk Items")
+
+    st.dataframe(
+        risk[[
+            "LOCATION", "PRODUCT_NAME", "CATEGORY",
+            "DAYS_COVER", "LEAD_TIME_DAYS"
+        ]].sort_values("DAYS_COVER"),
+        use_container_width=True
+    )
+
+# ======================================================
+# 🗺️ ALLOCATION INSIGHTS
+# ======================================================
+elif page == "🗺️ Allocation Insights":
+
+    def classify(row):
+        if row["CLOSING_STOCK"] > row["DAILY_SALES_AVG"] * 7:
+            return "SURPLUS"
+        elif row["CLOSING_STOCK"] < row["DAILY_SALES_AVG"] * 3:
+            return "DEFICIT"
+        else:
+            return "BALANCED"
+
+    alloc = filtered.copy()
+    alloc["STATE"] = alloc.apply(classify, axis=1)
+
+    st.markdown("### 🗺️ Surplus vs Deficit Mapping")
+
+    st.dataframe(
+        alloc[[
+            "LOCATION", "PRODUCT_NAME", "STATE",
+            "CLOSING_STOCK", "DAILY_SALES_AVG"
+        ]],
+        use_container_width=True
+    )
+
+# ======================================================
+# 🤝 DONATION & REDISTRIBUTION
+# ======================================================
+elif page == "🤝 Donation & Redistribution":
+
+    donate = filtered[
+        (filtered["TARGET_LABEL"] == "DONATE") &
+        (filtered["DAYS_TO_EXPIRY"] > 2)
+    ]
+
+    st.markdown("### 🤝 Items Safe for Donation / Redistribution")
+
+    st.dataframe(
+        donate[[
+            "LOCATION", "PRODUCT_NAME", "CATEGORY",
+            "CLOSING_STOCK", "DAYS_TO_EXPIRY"
+        ]],
+        use_container_width=True
+    )
+
+# ======================================================
+# 📦 REORDER PLANNING
+# ======================================================
+elif page == "📦 Reorder Planning":
+
+    reorder = filtered[filtered["TARGET_LABEL"] == "REORDER"].copy()
+
+    reorder["SUGGESTED_QTY"] = (
+        reorder["LEAD_TIME_DAYS"] * reorder["DAILY_SALES_AVG"] * 1.2
+        - reorder["CLOSING_STOCK"]
+    ).clip(lower=0)
+
+    st.markdown("### 📦 AI-Suggested Reorder Quantities")
+
+    st.dataframe(
+        reorder[[
+            "LOCATION", "PRODUCT_NAME", "CATEGORY",
+            "CLOSING_STOCK", "SUGGESTED_QTY"
+        ]],
+        use_container_width=True
+    )
+
+# ======================================================
+# 📈 IMPACT & AUDIT
+# ======================================================
+elif page == "📈 Impact & Audit":
+
+    impact = filtered["TARGET_LABEL"].value_counts().reset_index()
+    impact.columns = ["Decision", "Count"]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Waste Prevented", int(impact[impact["Decision"]=="DONATE"]["Count"].sum()))
+    c2.metric("Stock-outs Avoided", int(impact[impact["Decision"]=="REORDER"]["Count"].sum()))
+    c3.metric("Stable Items", int(impact[impact["Decision"]=="OK"]["Count"].sum()))
+
+    st.markdown("### 📊 Before vs After – Inventory Health")
+
+    st.bar_chart(impact.set_index("Decision"))
